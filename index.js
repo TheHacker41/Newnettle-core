@@ -16,6 +16,15 @@ const httpServer = createServer(app);
 const io = new Server(httpServer);
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, 'public')));
+await db.read();
+db.data.channels ||= [{
+  id: 'general',
+  name: 'general',
+  canRead: true,
+  canWrite: true
+}];
+db.data.messages ||= [];
+await db.write();
 const OWNER_EMAILS = [
     'infinitecodehs@gmail.com'
 ];
@@ -79,11 +88,14 @@ app.post('/login', async (req, res) => {
     res.json({ ok: true, user });
 });
 app.post('/update-profile', upload.single('pfp'), async (req, res) => {
-    const { id, color } = req.body;
+    const { id, color, displayName, email, bio } = req.body;
     await db.read();
     const user = db.data.users.find(u => u.id == id);
     if (!user) return res.json({ ok: false });
     if (color) user.color = color;
+    if (displayName) user.displayName = displayName;
+    if (email) user.email = email;
+    if (bio !== undefined) user.bio = bio;
     if (req.file) {
         user.profilePic = `/pfps/${req.file.filename}`;
     }
@@ -92,34 +104,76 @@ app.post('/update-profile', upload.single('pfp'), async (req, res) => {
 });
 io.on('connection', socket => {
     console.log('A User Connected');
-    socket.emit('init', (db.data.messages || []).map(m => {
-        const user = db.data.users.find(u => u.id === m.userId);
-        return {
-            ...m,
-            username: user?.displayName || 'Unknown',
-            color: user?.color || '#000',
-            profilePic: user?.profilePic || '',
-            role: user?.role || 'user'
-        };
-    }));
+    socket.on('join-channel', async ({ channelId, user }) => {
+        await db.read();
+        const channel = db.data.channels.find(c => c.id === channelId);
+        if (!channel) return;
+        if (!channel.canRead && user?.role !== 'owner') return;
+        const messages = db.data.messages
+        .filter(m => m.channelId === channelId)
+        .map(m => {
+            const u = db.data.users.find(x => x.id === m.userId);
+            return {
+                ...m,
+                username: u?.displayName || 'Unknown',
+                color: u?.color || '#000',
+                profilePic: u?.profilePic || '',
+                role: u?.role || 'user'
+            };
+        });
+        socket.emit('init', messages);
+    });
+    socket.emit('channels', db.data.channels);
     socket.on('message', async msg => {
+        await db.read();
+        const user = db.data.users.find(u => u.id === msg.userId);
+        const channel = db.data.channels.find(c => c.id === msg.channelId);
+        if (!user || !channel) return;
+        if (!channel.canWrite && user.role !== 'owner') return;
         const message = {
             id: shortid.generate(),
             userId: msg.userId,
+            channelId: msg.channelId,
             content: msg.content,
             timestamp: new Date(),
             edited: false
         };
         db.data.messages.push(message);
         await db.write();
-        const user = db.data.users.find(u => u.id === msg.userId);
         io.emit('message', {
             ...message,
-            username: user?.displayName || 'Unknown',
-            color: user?.color || '#000',
-            profilePic: user?.profilePic || '',
-            role: user?.role || 'user'
+            username: user.displayName,
+            color: user.color,
+            profilePic: user.profilePic,
+            role: user.role
         });
+    });
+    socket.on('create-channel', async ({ name, user }) => {
+        if (user.role !== 'owner') return;
+        await db.read();
+        db.data.channels.push({
+            id: shortid.generate(),
+            name,
+            canRead: true,
+            canWrite: true
+        });
+        await db.write();
+        io.emit('channels', db.data.channels);
+    });
+    socket.on('update-channel', async ({ id, updates, user }) => {
+        if (user.role !== 'owner') return;
+        await db.read();
+        Object.assign(db.data.channels.find(c => c.id === id), updates);
+        await db.write();
+        io.emit('channels', db.data.channels);
+    });
+    socket.on('delete-channel', async ({ id, user }) => {
+        if (user.role !== 'owner') return;
+        await db.read();
+        db.data.channels = db.data.channels.filter(c => c.id !== id);
+        db.data.messages = db.data.messages.filter(m => m.channelId !== id);
+        await db.write();
+        io.emit('channels', db.data.channels);
     });
     socket.on('edit', async ({ messageId, userId, newContent }) => {
         await db.read();

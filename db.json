@@ -1,4 +1,12 @@
 {
   "users": [],
+  "channels": [
+    {
+      "id": "general",
+      "name": "general",
+      "canRead": true,
+      "canWrite": true
+    }
+  ],
   "messages": []
 }
